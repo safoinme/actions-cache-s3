@@ -1,17 +1,15 @@
-import * as cache from "@actions/cache";
 import * as core from "@actions/core";
-
+import * as tar from "tar";
+import * as path from "path";
+import * as fs from "fs";
 import { Events, Inputs, State } from "./constants";
 import { IStateProvider } from "./stateProvider";
 import * as utils from "./utils/actionUtils";
 
-// Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
-// @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
-// throw an uncaught exception.  Instead of failing this action, just warn.
+// Catch and log any unhandled exceptions.
 process.on("uncaughtException", e => utils.logWarning(e.message));
 
-async function saveImpl(stateProvider: IStateProvider): Promise<number | void> {
-    let cacheId = -1;
+async function saveImpl(stateProvider: IStateProvider): Promise<void> {
     try {
         if (!utils.isCacheFeatureAvailable()) {
             return;
@@ -26,54 +24,40 @@ async function saveImpl(stateProvider: IStateProvider): Promise<number | void> {
             return;
         }
 
-        // If restore has stored a primary key in state, reuse that
-        // Else re-evaluate from inputs
-        const primaryKey =
-            stateProvider.getState(State.CachePrimaryKey) ||
-            core.getInput(Inputs.Key);
-
+        const primaryKey = stateProvider.getState(State.CachePrimaryKey) || core.getInput(Inputs.Key);
         if (!primaryKey) {
             utils.logWarning(`Key is not specified.`);
             return;
         }
 
-        // If matched restore key is same as primary key, then do not save cache
-        // NO-OP in case of SaveOnly action
         const restoredKey = stateProvider.getCacheState();
-
         if (utils.isExactKeyMatch(primaryKey, restoredKey)) {
-            core.info(
-                `Cache hit occurred on the primary key ${primaryKey}, not saving cache.`
-            );
+            core.info(`Cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
             return;
         }
 
-        const cachePaths = utils.getInputAsArray(Inputs.Path, {
-            required: true
-        });
-        const s3BucketName = core.getInput(Inputs.AWSS3Bucket);
-        const s3config = utils.getInputS3ClientConfig();
+        const cachePaths = utils.getInputAsArray(Inputs.Path, { required: true });
+        const cacheDirectory = "/caching"; // Replace with your actual PVC mount path
+        const tarballPath = path.join(cacheDirectory, `${primaryKey}.tar`);
 
-        const enableCrossOsArchive = utils.getInputAsBool(
-            Inputs.EnableCrossOsArchive
-        );
-
-        cacheId = await cache.saveCache(
-            cachePaths,
-            primaryKey,
-            { uploadChunkSize: utils.getInputAsInt(Inputs.UploadChunkSize) },
-            enableCrossOsArchive,
-            s3config,
-            s3BucketName
-        );
-
-        if (cacheId != -1) {
-            core.info(`Cache saved with key: ${primaryKey}`);
+        // Ensure the cache directory exists
+        if (!fs.existsSync(cacheDirectory)) {
+            fs.mkdirSync(cacheDirectory, { recursive: true });
         }
-    } catch (error: unknown) {
+
+        await tar.create(
+            {
+                gzip: true,
+                file: tarballPath,
+                cwd: process.cwd()
+            },
+            cachePaths
+        );
+
+        core.info(`Cache saved with key: ${primaryKey}`);
+    } catch (error) {
         utils.logWarning((error as Error).message);
     }
-    return cacheId;
 }
 
 export default saveImpl;
